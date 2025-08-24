@@ -86,3 +86,30 @@ a.desc:after {
 .form-group {
     margin-bottom: 1rem;
 }
+
+.book-card {
+    border: 1px solid #ddd;
+    padding: 15px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    display: flex;
+    align-items: flex-start;
+}
+.book-card img {
+    max-width: 100px;
+    margin-right: 20px;
+}
+.book-info {
+    flex: 1;
+}
+.book-actions {
+    margin-top: 10px;
+}
+.error-message {
+    color: red;
+    margin-top: 10px;
+}
+.success-message {
+    color: green;
+    margin-top: 10px;
+}

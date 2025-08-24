@@ -46,6 +46,8 @@ $this->registerLinkTag(['rel' => 'icon', 'type' => 'image/x-icon', 'href' => Yii
             !Yii::$app->user->isGuest],
             ['label' => 'Книги', 'url' => ['/book'],  'visible' =>
             !Yii::$app->user->isGuest],
+            ['label' => 'Поиск книг', 'url' => ['/book/search-page'],  'visible' =>
+            !Yii::$app->user->isGuest],
             ['label' => 'Пользователи', 'url' => ['/user'],  'visible' =>
             !Yii::$app->user->isGuest],
             Yii::$app->user->isGuest

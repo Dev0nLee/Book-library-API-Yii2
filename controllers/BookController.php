@@ -4,11 +4,13 @@ namespace app\controllers;
 
 use app\models\Book;
 use yii\web\Controller;
+use yii\web\UploadedFile;
+use yii\httpclient\Client;
 use yii\filters\VerbFilter;
 use yii\filters\AccessControl;
 use yii\data\ActiveDataProvider;
 use yii\web\NotFoundHttpException;
-use yii\web\UploadedFile;
+use yii\web\BadRequestHttpException;
 
 /**
  * BookController implements the CRUD actions for Book model.
@@ -25,10 +27,10 @@ class BookController extends Controller
             [
                 'access' => [
                 'class' => AccessControl::class,
-                'only' => ['index', 'read-file', 'view-user-library'],
+                'only' => ['index', 'read-file', 'view-user-library', 'search-page', 'search-ajax', 'save-book-ajax'],
                 'rules' => [
                     [
-                        'actions' => ['index', 'read-file', 'view-user-library'],
+                        'actions' => ['index', 'read-file', 'view-user-library', 'search-page', 'search-ajax', 'save-book-ajax'],
                         'allow' => true,
                         'roles' => ['@'],
                     ],
@@ -289,5 +291,247 @@ class BookController extends Controller
         }
 
         throw new NotFoundHttpException('The requested page does not exist.');
+    }
+
+    /**
+     * Search books using Google Books API and MIF search
+     * @param string $query Search query for book title
+     * @return array List of found books
+     * @throws BadRequestHttpException
+     */
+    public function actionSearch($query)
+    {
+        if (empty($query)) {
+            throw new BadRequestHttpException('Search query cannot be empty');
+        }
+
+        $client = new Client();
+        $books = [];
+
+        try {
+            $response = $client->createRequest()
+                ->setMethod('GET')
+                ->setUrl('https://www.googleapis.com/books/v1/volumes')
+                ->setData(['q' => $query])
+                ->send();
+
+            if ($response->isOk && isset($response->data['items'])) {
+                $googleBooks = $response->data['items'];
+                foreach ($googleBooks as $book) {
+                    $volumeInfo = $book['volumeInfo'] ?? [];
+                    $books[] = [
+                        'id' => $book['id'],
+                        'title' => $volumeInfo['title'] ?? 'Без названия',
+                        'authors' => $volumeInfo['authors'] ?? ['Неизвестный автор'],
+                        'description' => $volumeInfo['description'] ?? 'Описание отсутствует',
+                        'source' => 'google',
+                        'url' => $volumeInfo['infoLink'] ?? '',
+                        'image' => $volumeInfo['imageLinks']['thumbnail'] ?? '',
+                        'publishedDate' => $volumeInfo['publishedDate'] ?? '',
+                        'pageCount' => $volumeInfo['pageCount'] ?? 0
+                    ];
+                }
+            }
+        } catch (\Exception $e) {
+            \Yii::error('Google Books API error: ' . $e->getMessage());
+        }
+
+        try {
+            $response = $client->createRequest()
+                ->setMethod('GET')
+                ->setUrl('https://www.mann-ivanov-ferber.ru/book/search.ajax')
+                ->setData(['q' => $query])
+                ->send();
+
+            if ($response->isOk && !empty($response->data)) {
+                $mifBooks = is_array($response->data) ? $response->data : [$response->data];
+                foreach ($mifBooks as $book) {
+                    if (is_array($book) && isset($book['title'])) {
+                        $books[] = [
+                            'id' => $book['id'] ?? uniqid('mif_'),
+                            'title' => $book['title'] ?? 'Без названия',
+                            'authors' => [$book['author'] ?? 'Неизвестный автор'],
+                            'description' => $book['description'] ?? 'Описание отсутствует',
+                            'source' => 'mif',
+                            'url' => $book['url'] ?? '',
+                            'image' => $book['image'] ?? '',
+                            'publishedDate' => $book['published_date'] ?? '',
+                            'pageCount' => $book['page_count'] ?? 0
+                        ];
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            \Yii::error('MIF API error: ' . $e->getMessage());
+        }
+
+        return $books;
+    }
+
+    /**
+     * AJAX search books using Google Books API and MIF search
+     * @return \yii\web\Response
+     */
+    public function actionSearchAjax()
+    {
+        \Yii::$app->response->format = \yii\web\Response::FORMAT_JSON;
+        
+        $query = \Yii::$app->request->get('q');
+        
+        if (empty($query)) {
+            return ['success' => false, 'message' => 'Поисковый запрос не может быть пустым'];
+        }
+        
+        try {
+            $books = $this->actionSearch($query);
+            return [
+                'success' => true,
+                'books' => $books,
+                'count' => count($books),
+                'message' => 'Поиск выполнен успешно'
+            ];
+        } catch (\Exception $e) {
+            return [
+                'success' => false,
+                'message' => 'Ошибка при поиске: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * AJAX save book to database
+     * @return \yii\web\Response
+     */
+    public function actionSaveBookAjax()
+    {
+        \Yii::$app->response->format = \yii\web\Response::FORMAT_JSON;
+        
+        try {
+            $result = $this->actionSaveBook();
+            return $result;
+        } catch (\Exception $e) {
+            return [
+                'status' => 'error',
+                'message' => 'Ошибка при сохранении: ' . $e->getMessage()
+            ];
+        }
+    }
+
+    /**
+     * Save a book to the database
+     * @return array
+     * @throws BadRequestHttpException
+     * @throws NotFoundHttpException
+     */
+    public function actionSaveBook()
+    {
+        $id = \Yii::$app->request->post('id');
+        $source = \Yii::$app->request->post('source');
+        $userId = \Yii::$app->user->id;
+
+        if (empty($id) || empty($source) || empty($userId)) {
+            throw new BadRequestHttpException('Missing required parameters: id, source, or user_id');
+        }
+
+        $client = new Client();
+        $bookData = null;
+
+        if ($source === 'google') {
+            try {
+                $response = $client->createRequest()
+                    ->setMethod('GET')
+                    ->setUrl("https://www.googleapis.com/books/v1/volumes/{$id}")
+                    ->send();
+
+                if (!$response->isOk) {
+                    throw new NotFoundHttpException('Книга не найдена в Google Books');
+                }
+
+                $bookData = $response->data;
+                $volumeInfo = $bookData['volumeInfo'] ?? [];
+                $title = $volumeInfo['title'] ?? 'Без названия';
+                $description = $volumeInfo['description'] ?? $volumeInfo['infoLink'] ?? '';
+
+                if (empty($description)) {
+                    $description = $volumeInfo['infoLink'] ?? '';
+                }
+            } catch (\Exception $e) {
+                \Yii::error('Google Books API error in saveBook: ' . $e->getMessage());
+                throw new BadRequestHttpException('Ошибка при получении данных книги из Google Books');
+            }
+        } elseif ($source === 'mif') {
+            try {
+                $response = $client->createRequest()
+                    ->setMethod('GET')
+                    ->setUrl("https://www.mann-ivanov-ferber.ru/book/search.ajax")
+                    ->setData(['q' => $id])
+                    ->send();
+
+                if (!$response->isOk || empty($response->data)) {
+                    throw new NotFoundHttpException('Книга не найдена в MIF');
+                }
+
+                $mifBooks = is_array($response->data) ? $response->data : [$response->data];
+                $bookData = $mifBooks[0] ?? null;
+                
+                if (!$bookData || !isset($bookData['title'])) {
+                    throw new NotFoundHttpException('Данные книги не найдены в MIF');
+                }
+                
+                $title = $bookData['title'] ?? 'Без названия';
+                $description = $bookData['description'] ?? $bookData['url'] ?? '';
+
+                if (empty($description)) {
+                    $description = $bookData['url'] ?? '';
+                }
+            } catch (\Exception $e) {
+                \Yii::error('MIF API error in saveBook: ' . $e->getMessage());
+                throw new BadRequestHttpException('Ошибка при получении данных книги из MIF');
+            }
+        } else {
+            throw new BadRequestHttpException('Неверный источник книги');
+        }
+
+        $existingBook = Book::find()
+            ->where(['title' => $title, 'user_id' => $userId])
+            ->one();
+            
+        if ($existingBook) {
+            return [
+                'status' => 'error',
+                'message' => 'Книга с таким названием уже существует в вашей библиотеке',
+                'book_id' => $existingBook->id
+            ];
+        }
+        
+        $book = new Book();
+        $book->title = $title;
+        $book->text = $description; 
+        $book->user_id = $userId;
+        $book->status = 1;
+
+        if ($book->save()) {
+            return [
+                'status' => 'success',
+                'message' => 'Книга успешно сохранена в библиотеку',
+                'book' => [
+                    'id' => $book->id,
+                    'title' => $book->title,
+                    'text' => $book->text,
+                    'user_id' => $book->user_id
+                ]
+            ];
+        }
+
+        throw new BadRequestHttpException('Не удалось сохранить книгу: ' . json_encode($book->errors));
+    }
+
+    /**
+     * Display search page for books
+     * @return string
+     */
+    public function actionSearchPage()
+    {
+        return $this->render('search');
     }
 }
